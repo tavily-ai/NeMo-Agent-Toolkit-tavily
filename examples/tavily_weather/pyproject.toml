@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026, Tavily AI. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/nat_tavily_weather"]
+
+[project]
+name = "nat_tavily_weather"
+version = "0.1.0"
+requires-python = ">=3.11,<3.14"
+description = "Tavily + LangChain ReAct + Anthropic example workflow"
+keywords = ["ai", "agents", "tavily", "anthropic"]
+classifiers = ["Programming Language :: Python"]
+
+dependencies = [
+  "nvidia-nat[langchain] >= 1.6, < 2.0",
+  "nemo-agent-toolkit-tavily",
+]
+
+[tool.uv.sources]
+nemo-agent-toolkit-tavily = { path = "../..", editable = true }
