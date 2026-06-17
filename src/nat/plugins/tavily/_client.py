@@ -16,13 +16,13 @@
 
 import os
 
-from nat.data_models.common import SerializableSecretStr
-from nat.data_models.common import get_secret_value
+from nat.plugin_api import SerializableSecretStr
+from nat.plugin_api import get_secret_value
 from tavily import AsyncTavilyClient
 
 
-def build_async_client(api_key: SerializableSecretStr | None) -> AsyncTavilyClient:
-    """Construct an AsyncTavilyClient, resolving the API key from config or TAVILY_API_KEY env."""
+def resolve_api_key(api_key: SerializableSecretStr | None) -> str:
+    """Resolve the Tavily API key from config or TAVILY_API_KEY env."""
     resolved = None
     if api_key:
         api_key_value = get_secret_value(api_key)
@@ -41,4 +41,14 @@ def build_async_client(api_key: SerializableSecretStr | None) -> AsyncTavilyClie
     if not resolved:
         raise ValueError(
             "Tavily API key not provided. Set the `api_key` config field or the TAVILY_API_KEY env var.")
-    return AsyncTavilyClient(api_key=resolved, client_name="nemo-agent-toolkit-tavily")
+    return resolved
+
+
+def build_async_client_from_key(api_key: str) -> AsyncTavilyClient:
+    """Construct an AsyncTavilyClient from an already resolved API key."""
+    return AsyncTavilyClient(api_key=api_key, client_name="nemo-agent-toolkit-tavily")
+
+
+def build_async_client(api_key: SerializableSecretStr | None) -> AsyncTavilyClient:
+    """Construct an AsyncTavilyClient, resolving the API key from config or TAVILY_API_KEY env."""
+    return build_async_client_from_key(resolve_api_key(api_key))

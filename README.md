@@ -12,6 +12,10 @@ uv add nemo-agent-toolkit-tavily
 
 NAT auto-discovers the plugin via `importlib.metadata.entry_points()`. No additional NAT configuration required.
 
+## Compatibility
+
+This package supports NVIDIA NeMo Agent Toolkit `>=1.8,<2.0`.
+
 ## Configuration
 
 ### `TavilyToolsGroupConfig`

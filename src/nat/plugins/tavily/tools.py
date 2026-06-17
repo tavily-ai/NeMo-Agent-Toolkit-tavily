@@ -32,14 +32,15 @@ from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import create_model
 
-from nat.builder.builder import Builder
-from nat.builder.function import FunctionGroup
-from nat.cli.register_workflow import register_function_group
-from nat.data_models.common import SerializableSecretStr
-from nat.data_models.function import FunctionGroupBaseConfig
+from nat.plugin_api import Builder
+from nat.plugin_api import FunctionGroup
+from nat.plugin_api import FunctionGroupBaseConfig
+from nat.plugin_api import SerializableSecretStr
+from nat.plugin_api import register_function_group
 from tavily import AsyncTavilyClient
 
-from ._client import build_async_client
+from ._client import build_async_client_from_key
+from ._client import resolve_api_key
 from .parse_streaming import _accumulate_research_stream
 
 logger = logging.getLogger(__name__)
@@ -176,29 +177,34 @@ class TavilyToolsGroupConfig(FunctionGroupBaseConfig, name="tavily"):
 @register_function_group(config_type=TavilyToolsGroupConfig)
 async def tavily_tools(config: TavilyToolsGroupConfig, _builder: Builder) -> AsyncIterator[FunctionGroup]:
     """Register the `tavily` function group."""
-    client = build_async_client(config.api_key)
+    api_key = resolve_api_key(config.api_key)
 
     async def _search(value: TavilySearchInput) -> dict:
-        return await client.search(**value.model_dump(exclude_none=True))
+        async with build_async_client_from_key(api_key) as client:
+            return await client.search(**value.model_dump(exclude_none=True))
 
     async def _extract(value: TavilyExtractInput) -> dict:
-        return await client.extract(**value.model_dump(exclude_none=True))
+        async with build_async_client_from_key(api_key) as client:
+            return await client.extract(**value.model_dump(exclude_none=True))
 
     async def _crawl(value: TavilyCrawlInput) -> dict:
-        return await client.crawl(**value.model_dump(exclude_none=True))
+        async with build_async_client_from_key(api_key) as client:
+            return await client.crawl(**value.model_dump(exclude_none=True))
 
     async def _map(value: TavilyMapInput) -> dict:
-        return await client.map(**value.model_dump(exclude_none=True))
+        async with build_async_client_from_key(api_key) as client:
+            return await client.map(**value.model_dump(exclude_none=True))
 
     async def _research(value: TavilyResearchInput) -> dict:
         # `client.research` is async-def; awaiting it returns an AsyncGenerator[bytes] when
         # stream=True (or a dict when stream=False, which we don't use here).
-        stream = await client.research(
-            stream=True,
-            timeout=config.research_timeout_seconds,
-            **value.model_dump(exclude_none=True),
-        )
-        return await _accumulate_research_stream(stream, include_trace=config.research_include_trace)
+        async with build_async_client_from_key(api_key) as client:
+            stream = await client.research(
+                stream=True,
+                timeout=config.research_timeout_seconds,
+                **value.model_dump(exclude_none=True),
+            )
+            return await _accumulate_research_stream(stream, include_trace=config.research_include_trace)
 
     group = FunctionGroup(config=config)
     group.add_function("search", _search, input_schema=TavilySearchInput, description=_DESCRIPTIONS["search"])

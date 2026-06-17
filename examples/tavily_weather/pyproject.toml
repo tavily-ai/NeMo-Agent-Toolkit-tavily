@@ -17,7 +17,7 @@ keywords = ["ai", "agents", "tavily", "anthropic"]
 classifiers = ["Programming Language :: Python"]
 
 dependencies = [
-  "nvidia-nat[langchain] >= 1.6, < 2.0",
+  "nvidia-nat[langchain] >= 1.8",
   "nemo-agent-toolkit-tavily",
 ]
 

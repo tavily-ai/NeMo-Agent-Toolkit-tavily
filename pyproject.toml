@@ -10,7 +10,7 @@ packages = ["src/nat"]
 
 [project]
 name = "nemo-agent-toolkit-tavily"
-version = "0.1.0"
+version = "0.2.0"
 requires-python = ">=3.11,<3.14"
 description = "Tavily integration for NVIDIA NeMo Agent Toolkit"
 readme = "README.md"
@@ -26,8 +26,7 @@ classifiers = [
 ]
 
 dependencies = [
-  # Compat-release range per the 3P plugin spec: tracks NAT minors, breaks on major.
-  "nvidia-nat-core >= 1.6, < 2.0",
+  "nvidia-nat-core >= 1.8",
   "tavily-python >= 0.7.0, < 1.0.0",
 ]
 
@@ -35,14 +34,14 @@ dependencies = [
 test = [
   "pytest >= 8.0",
   "pytest-asyncio >= 0.24",
-  "nvidia-nat-test >= 1.6, < 2.0",
+  "nvidia-nat-test >= 1.8",
 ]
 
 [project.urls]
 documentation = "https://docs.nvidia.com/nemo/agent-toolkit/latest/"
 source = "https://github.com/tavily-ai/NeMo-Agent-Toolkit-tavily"
 
-[project.entry-points.'nat.components']
+[project.entry-points.'nat.plugins']
 nat_tavily = "nat.plugins.tavily.register"
 
 [tool.pytest.ini_options]
