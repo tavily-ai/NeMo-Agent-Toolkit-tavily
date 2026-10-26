@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import base64
 import builtins
 import inspect
 import importlib.metadata
@@ -176,7 +177,7 @@ def test_build_async_client_rejects_whitespace_env_api_key(monkeypatch):
         build_async_client(None)
 
 
-async def test_group_exposes_all_five_tools(monkeypatch):
+async def test_group_exposes_all_tools(monkeypatch):
     monkeypatch.setenv("TAVILY_API_KEY", "test-key")
 
     runner = ToolTestRunner()
@@ -188,6 +189,7 @@ async def test_group_exposes_all_five_tools(monkeypatch):
         "tavily__crawl",
         "tavily__map",
         "tavily__research",
+        "tavily__research_status",
     }
 
 
@@ -342,3 +344,99 @@ async def test_research_current_options_and_completed_stream(monkeypatch):
     assert result["content"] == {"answer": "test"}
     assert result["sources"] == [{"url": "https://example.com"}]
     assert captured["stream"] is True
+
+
+def _research_http(monkeypatch, response_for):
+    import httpx
+
+    captured = {}
+
+    async def send(self, request, **kwargs):
+        captured["method"] = request.method
+        captured["url"] = str(request.url)
+        captured["body"] = json.loads(request.content) if request.content else None
+        captured["headers"] = request.headers
+        return response_for(httpx, request)
+
+    monkeypatch.setattr(httpx.AsyncClient, "send", send)
+    return captured
+
+
+async def _invoke(tool, payload, **config):
+    config = TavilyToolsGroupConfig(api_key=SerializableSecretStr("test-placeholder"),
+                                    api_base_url="https://synthetic.invalid", include=[tool], **config)
+    async with WorkflowBuilder() as builder:
+        group = await builder.add_function_group("tavily", config)
+        await group.get_accessible_functions()
+        function = await builder.get_function(f"tavily__{tool}")
+        return await function.ainvoke(payload)
+
+
+async def test_research_wire_request_files_schema_and_streamed_result(monkeypatch):
+    sse = (b'data: {"model":"pro","choices":[{"delta":{"content":{"company":"Acme"}}}]}\r\n\r\n'
+           b'data: {"choices":[{"delta":{"sources":[{"url":"https://example.com","title":"E"}]}}]}\r\n\r\n'
+           b'event: done\r\n\r\n')
+    captured = _research_http(monkeypatch, lambda httpx, request: httpx.Response(
+        200, request=request, headers={"content-type": "text/event-stream"}, content=sse))
+    file_data = base64.b64encode(b"# notes").decode()
+    schema = {"properties": {"company": {"type": "string", "description": "Name"}}, "required": ["company"]}
+    result = await _invoke("research", {
+        "input": "synthetic", "model": "pro", "output_schema": schema, "citation_format": "apa",
+        "include_domains": ["sec.gov"], "exclude_domains": ["medium.com"], "output_length": "long",
+        "files": [{"name": "notes.md", "data": file_data}],
+    })
+    body = captured["body"]
+    assert captured["url"] == "https://synthetic.invalid/research" and body["stream"] is True
+    assert body["output_schema"] == schema and body["citation_format"] == "apa"
+    assert body["include_domains"] == ["sec.gov"] and body["exclude_domains"] == ["medium.com"]
+    assert body["output_length"] == "long" and body["model"] == "pro"
+    assert body["files"] == [{"name": "notes.md", "data": file_data, "type": "base64"}]
+    assert captured["headers"]["X-Client-Name"] == "nemo-agent-toolkit-tavily"
+    assert result["content"] == {"company": "Acme"}
+    assert result["sources"] == [{"url": "https://example.com", "title": "E"}]
+
+
+async def test_research_status_lifecycle_pending_completed_failed(monkeypatch):
+    bodies = {
+        "pending": (202, {"request_id": "r1", "status": "pending", "response_time": 1}),
+        "done": (200, {"request_id": "r1", "status": "completed", "content": "x", "sources": []}),
+        "bad": (200, {"request_id": "r1", "status": "failed"}),
+    }
+    state = {"which": "pending"}
+
+    def respond(httpx, request):
+        code, data = bodies[state["which"]]
+        return httpx.Response(code, request=request, json=data)
+
+    captured = _research_http(monkeypatch, respond)
+    for which, status in (("pending", "pending"), ("done", "completed"), ("bad", "failed")):
+        state["which"] = which
+        result = await _invoke("research_status", {"request_id": "r1", "include_usage": True})
+        assert result["status"] == status
+        assert captured["method"] == "GET"
+        assert captured["url"].startswith("https://synthetic.invalid/research/r1")
+        assert "include_usage=true" in captured["url"]
+
+
+@pytest.mark.parametrize("bad", [
+    {"files": [{"name": "a.pdf", "data": base64.b64encode(b"x").decode()}]},
+    {"files": [{"name": "a.txt", "data": "not base64!"}]},
+    {"files": [{"name": f"{i}.txt", "data": "eA=="} for i in range(6)]},
+    {"include_domains": [f"d{i}.com" for i in range(21)]},
+    {"exclude_domains": [f"d{i}.com" for i in range(21)]},
+    {"output_schema": {"type": "object"}},
+    {"output_length": "huge"},
+])
+def test_research_schema_rejects_values_the_api_rejects(bad):
+    from pydantic import ValidationError
+    with pytest.raises(ValidationError):
+        TavilyResearchInput(input="synthetic", **bad)
+
+
+def test_research_schema_accepts_stringified_lists_and_limits_are_in_json_schema():
+    data = base64.b64encode(b"{}").decode()
+    parsed = TavilyResearchInput(input="x", files=json.dumps([{"name": "a.json", "data": data}]),
+                                 include_domains='["a.com"]')
+    assert parsed.files[0].type == "base64" and parsed.include_domains == ["a.com"]
+    props = TavilyResearchInput.model_json_schema()["properties"]
+    assert "maxItems" in json.dumps(props["files"]) and "maxItems" in json.dumps(props["include_domains"])

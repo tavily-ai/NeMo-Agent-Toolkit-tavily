@@ -14,6 +14,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import base64
+import binascii
 import inspect
 import json
 import logging
@@ -32,6 +34,7 @@ from pydantic import BeforeValidator
 from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import create_model
+from pydantic import field_validator
 
 from nat.plugin_api import Builder
 from nat.plugin_api import FunctionGroup
@@ -52,34 +55,32 @@ _HIDDEN_PARAMS: frozenset[str] = frozenset({"self", "kwargs", "timeout", "stream
 
 _LIST_ORIGINS: tuple[Any, ...] = (list, tuple, set, frozenset, AbcSequence)
 
-# Public API parameters currently forwarded through SDK **kwargs rather than named
-# in the SDK method signature. Keep them visible in generated agent tool schemas.
-_EXTRA_API_PARAMS: dict[str, dict[str, tuple[Any, str]]] = {
-    "search": {
-        "chunks_per_source": (int, "Chunks per source (1-3) for basic, advanced or fast."),
-        "include_image_descriptions": (bool, "Include descriptions for returned images."),
-        "safe_search": (bool, "Filter unsafe results; unavailable for fast/ultra-fast."),
-        "include_published_date": (bool, "Include estimated published dates (beta)."),
-        "filter_by_published_date": (bool, "Remove undated or out-of-window results."),
-    },
-    "research": {
-        "include_domains": (list[str], "Prefer these domains (up to 20); not a hard filter."),
-        "exclude_domains": (list[str], "Exclude these domains (up to 20)."),
-        "output_length": (Literal["short", "standard", "long"], "Report length."),
-        "files": (list[dict[str, Any]], "Supporting files in the API file format."),
-    },
-}
-_API_TIMEOUT_METHODS = frozenset({"extract", "crawl", "map"})
+_RESEARCH_FILE_EXTENSIONS = (".txt", ".md", ".json")
 
 
-def _annotation_accepts_list(annotation: Any) -> bool:
-    """True if `annotation` is (or contains, in a Union) a list/sequence type."""
-    origin = typing.get_origin(annotation)
-    if origin in _LIST_ORIGINS:
-        return True
-    if origin in (Union, types.UnionType):
-        return any(_annotation_accepts_list(a) for a in typing.get_args(annotation))
-    return False
+class ResearchFile(BaseModel):
+    """One Research file attachment, as documented by the Tavily API."""
+
+    name: str = Field(description="Filename with a .txt, .md or .json extension.")
+    data: str = Field(description="Base64-encoded file contents.")
+    type: Literal["base64"] = "base64"
+
+    @field_validator("name")
+    @classmethod
+    def _check_name(cls, value: str) -> str:
+        if not value.lower().endswith(_RESEARCH_FILE_EXTENSIONS):
+            raise ValueError("file name must end with .txt, .md or .json")
+        return value
+
+    @field_validator("data")
+    @classmethod
+    def _check_data(cls, value: str) -> str:
+        try:
+            if base64.b64encode(base64.b64decode(value, validate=True)).decode("ascii") != value:
+                raise ValueError("not canonical base64")
+        except (binascii.Error, ValueError) as exc:
+            raise ValueError("file data must be canonical base64") from exc
+        return value
 
 
 def _coerce_json_list(value: Any) -> Any:
@@ -100,6 +101,48 @@ def _coerce_json_list(value: Any) -> Any:
                 return value
             if isinstance(parsed, list):
                 return parsed
+    return value
+
+
+# Documented Research limits: up to 20 include/exclude domains and 5 files.
+_Domains = Annotated[list[str], Field(max_length=20), BeforeValidator(_coerce_json_list)]
+_ResearchFiles = Annotated[list[ResearchFile], Field(max_length=5), BeforeValidator(_coerce_json_list)]
+
+
+# Public API parameters currently forwarded through SDK **kwargs rather than named
+# in the SDK method signature. Keep them visible in generated agent tool schemas.
+_EXTRA_API_PARAMS: dict[str, dict[str, tuple[Any, str]]] = {
+    "search": {
+        "chunks_per_source": (int, "Chunks per source (1-3) for basic, advanced or fast."),
+        "include_image_descriptions": (bool, "Include descriptions for returned images."),
+        "safe_search": (bool, "Filter unsafe results; unavailable for fast/ultra-fast."),
+        "include_published_date": (bool, "Include estimated published dates (beta)."),
+        "filter_by_published_date": (bool, "Remove undated or out-of-window results."),
+    },
+    "research": {
+        "include_domains": (_Domains, "Prefer these domains (up to 20); not a hard filter."),
+        "exclude_domains": (_Domains, "Block these domains and their subdomains (up to 20)."),
+        "output_length": (Literal["short", "standard", "long"], "Report length."),
+        "files": (_ResearchFiles, "Up to 5 .txt/.md/.json files with base64 `data`, used as sources."),
+    },
+}
+_API_TIMEOUT_METHODS = frozenset({"extract", "crawl", "map"})
+
+
+def _annotation_accepts_list(annotation: Any) -> bool:
+    """True if `annotation` is (or contains, in a Union) a list/sequence type."""
+    origin = typing.get_origin(annotation)
+    if origin in _LIST_ORIGINS:
+        return True
+    if origin in (Union, types.UnionType):
+        return any(_annotation_accepts_list(a) for a in typing.get_args(annotation))
+    return False
+
+
+def _check_output_schema(cls: Any, value: Any) -> Any:
+    """The API requires an `output_schema` object with a `properties` object."""
+    if value is not None and not (isinstance(value, dict) and isinstance(value.get("properties"), dict)):
+        raise ValueError("output_schema must be an object with a `properties` object")
     return value
 
 
@@ -137,13 +180,18 @@ def _build_input_schema(method: Callable, name: str) -> type[BaseModel]:
 
     for param_name, (annotation, description) in _EXTRA_API_PARAMS.get(method.__name__, {}).items():
         if param_name not in fields:
-            if _annotation_accepts_list(annotation):
+            if typing.get_origin(annotation) is not Annotated and _annotation_accepts_list(annotation):
                 annotation = Annotated[annotation, BeforeValidator(_coerce_json_list)]
             fields[param_name] = (Union[annotation, None], Field(default=None, description=description))
+
+    validators = {}
+    if method.__name__ == "research":
+        validators["_check_output_schema"] = field_validator("output_schema")(_check_output_schema)
 
     return create_model(
         name,
         __config__=ConfigDict(arbitrary_types_allowed=True),
+        __validators__=validators,
         **fields,
     )
 
@@ -154,6 +202,11 @@ TavilyExtractInput: type[BaseModel] = _build_input_schema(AsyncTavilyClient.extr
 TavilyCrawlInput: type[BaseModel] = _build_input_schema(AsyncTavilyClient.crawl, "TavilyCrawlInput")
 TavilyMapInput: type[BaseModel] = _build_input_schema(AsyncTavilyClient.map, "TavilyMapInput")
 TavilyResearchInput: type[BaseModel] = _build_input_schema(AsyncTavilyClient.research, "TavilyResearchInput")
+
+
+class TavilyResearchStatusInput(BaseModel):
+    request_id: str = Field(min_length=1, description="Research task id (`request_id`).")
+    include_usage: bool | None = Field(default=None, description="Include credit usage.")
 
 _DESCRIPTIONS: dict[str, str] = {
     "search":
@@ -169,6 +222,9 @@ _DESCRIPTIONS: dict[str, str] = {
     "map":
         "Discover and list URLs reachable from a starting URL on a domain, without extracting "
         "page content. Faster than crawl. Use to find specific pages on a known site.",
+    "research_status":
+        "Check a Tavily research task by `request_id`. Returns `status` pending or in_progress "
+        "(not finished; poll again later) or completed or failed with the report, sources or error.",
     "research":
         "Run a deep, multi-source research task with citations. Returns a synthesized report "
         "(markdown or structured per `output_schema`) plus a list of sources. Slow (30-120s) — "
@@ -178,7 +234,7 @@ _DESCRIPTIONS: dict[str, str] = {
 
 
 class TavilyToolsGroupConfig(FunctionGroupBaseConfig, name="tavily"):
-    """Tavily tools group: search, extract, crawl, map, research.
+    """Tavily tools group: search, extract, crawl, map, research, research_status.
 
     All tools share a single AsyncTavilyClient and one API key. Per-call arguments
     come from the agent and are passed straight through to the SDK.
@@ -243,11 +299,18 @@ async def tavily_tools(config: TavilyToolsGroupConfig, _builder: Builder) -> Asy
             )
             return await _accumulate_research_stream(stream, include_trace=config.research_include_trace)
 
+    async def _research_status(value: TavilyResearchStatusInput) -> dict:
+        async with build_async_client_from_key(api_key, **client_options) as client:
+            return await client.get_research(**value.model_dump(exclude_none=True))
+
     group = FunctionGroup(config=config)
     group.add_function("search", _search, input_schema=TavilySearchInput, description=_DESCRIPTIONS["search"])
     group.add_function("extract", _extract, input_schema=TavilyExtractInput, description=_DESCRIPTIONS["extract"])
     group.add_function("crawl", _crawl, input_schema=TavilyCrawlInput, description=_DESCRIPTIONS["crawl"])
     group.add_function("map", _map, input_schema=TavilyMapInput, description=_DESCRIPTIONS["map"])
     group.add_function("research", _research, input_schema=TavilyResearchInput, description=_DESCRIPTIONS["research"])
+
+    group.add_function("research_status", _research_status, input_schema=TavilyResearchStatusInput,
+                       description=_DESCRIPTIONS["research_status"])
 
     yield group

@@ -55,6 +55,7 @@ function_groups:
 | `tavily__crawl` | Crawl a website with configurable depth/breadth |
 | `tavily__map` | Discover URLs on a domain without extracting content |
 | `tavily__research` | Deep multi-source research with citations (30–120s) |
+| `tavily__research_status` | Look up a research task by `request_id` (pending, in progress, completed or failed) |
 
 Schemas expose the installed SDK's named options plus public Search chunk, safe-search,
 image-description and published-date controls, and Research domain, output-length and
@@ -67,6 +68,16 @@ the HTTP request). Search transport timeouts stay hidden; Research uses
 `research_timeout_seconds`. Research raises an error if the stream ends before its
 `done` event, rather than returning a partial report as complete. Both LF and CRLF
 SSE separators are supported.
+
+Research `files` take up to 5 `.txt`, `.md` or `.json` entries with base64 `data`; `include_domains`
+and `exclude_domains` accept up to 20 entries; `output_schema` must contain `properties`.
+Invalid values are rejected before any request is sent.
+
+`tavily__research` streams, so it does not use the non-streaming create call. A separate
+"submit and poll later" tool is not provided: `tavily-python` 0.8.5 treats only HTTP 200 as
+success when creating a non-streaming Research task, while the API documents 201 (a fix is in
+tavily-python PR #206, unreleased). `tavily__research_status` only reads tasks (HTTP 200/202),
+so it works with 0.8.5.
 
 ## Minimal Workflow
 
