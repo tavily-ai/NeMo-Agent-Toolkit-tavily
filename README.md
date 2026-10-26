@@ -71,7 +71,7 @@ SSE separators are supported.
 
 Research `files` take up to 5 `.txt`, `.md` or `.json` entries with base64 `data`; `include_domains`
 and `exclude_domains` accept up to 20 entries; `output_schema` must contain `properties`.
-Invalid values are rejected before any request is sent.
+Invalid values are rejected before any request is sent. In addition, Tavily rejects an `output_schema` whose properties lack a `description` or whose `required` array is missing or empty; the tool does not check this locally.
 
 `tavily__research` streams, so it does not use the non-streaming create call. A separate
 "submit and poll later" tool is not provided: `tavily-python` 0.8.5 treats only HTTP 200 as
