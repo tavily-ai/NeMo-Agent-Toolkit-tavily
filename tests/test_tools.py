@@ -440,3 +440,38 @@ def test_research_schema_accepts_stringified_lists_and_limits_are_in_json_schema
     assert parsed.files[0].type == "base64" and parsed.include_domains == ["a.com"]
     props = TavilyResearchInput.model_json_schema()["properties"]
     assert "maxItems" in json.dumps(props["files"]) and "maxItems" in json.dumps(props["include_domains"])
+
+
+def _words_b64(n: int) -> str:
+    return base64.b64encode((" ".join(["w"] * n)).encode()).decode()
+
+
+def test_research_file_word_limits_per_file_and_combined():
+    from pydantic import ValidationError
+    ok = {"name": "a.txt", "data": _words_b64(80_000)}
+    assert TavilyResearchInput(input="x", files=[ok]).files[0].name == "a.txt"
+    with pytest.raises(ValidationError, match="80,000-word limit"):
+        TavilyResearchInput(input="x", files=[{"name": "a.txt", "data": _words_b64(80_001)}])
+    half = {"name": "b.md", "data": _words_b64(40_001)}
+    with pytest.raises(ValidationError, match="combined"):
+        TavilyResearchInput(input="x", files=[half, {"name": "c.md", "data": _words_b64(40_000)}])
+    assert len(TavilyResearchInput(input="x", files=[
+        {"name": "b.md", "data": _words_b64(40_000)}, {"name": "c.md", "data": _words_b64(40_000)}]).files) == 2
+
+
+@pytest.mark.parametrize("files", [
+    [{"name": "big.txt", "data": _words_b64(80_001)}],
+    [{"name": "a.txt", "data": _words_b64(50_000)}, {"name": "b.txt", "data": _words_b64(30_001)}],
+])
+async def test_research_over_limit_files_never_reach_transport(monkeypatch, files):
+    captured = _research_http(monkeypatch, lambda httpx, request: httpx.Response(200, request=request, json={}))
+    with pytest.raises(Exception):
+        await _invoke("research", {"input": "synthetic", "files": files})
+    assert captured == {}
+
+
+def test_research_files_description_states_word_limits():
+    props = TavilyResearchInput.model_json_schema()
+    text = json.dumps(props)
+    assert text.count("80,000 words") >= 2 or "80,000 words combined" in text
+    assert "max 80,000 words per file" in text

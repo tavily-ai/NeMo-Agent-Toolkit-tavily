@@ -30,6 +30,7 @@ from typing import Literal
 from typing import Union
 
 from pydantic import BaseModel
+from pydantic import AfterValidator
 from pydantic import BeforeValidator
 from pydantic import ConfigDict
 from pydantic import Field
@@ -56,13 +57,20 @@ _HIDDEN_PARAMS: frozenset[str] = frozenset({"self", "kwargs", "timeout", "stream
 _LIST_ORIGINS: tuple[Any, ...] = (list, tuple, set, frozenset, AbcSequence)
 
 _RESEARCH_FILE_EXTENSIONS = (".txt", ".md", ".json")
+# Documented Research limit: 80,000 words per file and 80,000 combined. The API does not
+# define "word"; we count whitespace-separated tokens of the UTF-8 decoded content.
+_MAX_RESEARCH_FILE_WORDS = 80_000
+
+
+def _word_count(encoded: str) -> int:
+    return len(base64.b64decode(encoded).decode("utf-8", errors="replace").split())
 
 
 class ResearchFile(BaseModel):
     """One Research file attachment, as documented by the Tavily API."""
 
     name: str = Field(description="Filename with a .txt, .md or .json extension.")
-    data: str = Field(description="Base64-encoded file contents.")
+    data: str = Field(description="Base64-encoded file contents (max 80,000 words per file).")
     type: Literal["base64"] = "base64"
 
     @field_validator("name")
@@ -80,7 +88,15 @@ class ResearchFile(BaseModel):
                 raise ValueError("not canonical base64")
         except (binascii.Error, ValueError) as exc:
             raise ValueError("file data must be canonical base64") from exc
+        if _word_count(value) > _MAX_RESEARCH_FILE_WORDS:
+            raise ValueError(f"file exceeds the {_MAX_RESEARCH_FILE_WORDS:,}-word limit")
         return value
+
+
+def _check_research_files_total(files: list[ResearchFile]) -> list[ResearchFile]:
+    if sum(_word_count(f.data) for f in files) > _MAX_RESEARCH_FILE_WORDS:
+        raise ValueError(f"files exceed the {_MAX_RESEARCH_FILE_WORDS:,}-word combined limit")
+    return files
 
 
 def _coerce_json_list(value: Any) -> Any:
@@ -106,7 +122,12 @@ def _coerce_json_list(value: Any) -> Any:
 
 # Documented Research limits: up to 20 include/exclude domains and 5 files.
 _Domains = Annotated[list[str], Field(max_length=20), BeforeValidator(_coerce_json_list)]
-_ResearchFiles = Annotated[list[ResearchFile], Field(max_length=5), BeforeValidator(_coerce_json_list)]
+_ResearchFiles = Annotated[
+    list[ResearchFile],
+    Field(max_length=5),
+    BeforeValidator(_coerce_json_list),
+    AfterValidator(_check_research_files_total),
+]
 
 
 # Public API parameters currently forwarded through SDK **kwargs rather than named
@@ -123,7 +144,7 @@ _EXTRA_API_PARAMS: dict[str, dict[str, tuple[Any, str]]] = {
         "include_domains": (_Domains, "Prefer these domains (up to 20); not a hard filter."),
         "exclude_domains": (_Domains, "Block these domains and their subdomains (up to 20)."),
         "output_length": (Literal["short", "standard", "long"], "Report length."),
-        "files": (_ResearchFiles, "Up to 5 .txt/.md/.json files with base64 `data`, used as sources."),
+        "files": (_ResearchFiles, "Up to 5 .txt/.md/.json files with base64 `data`, used as sources; max 80,000 words per file and 80,000 words combined."),
     },
 }
 _API_TIMEOUT_METHODS = frozenset({"extract", "crawl", "map"})
