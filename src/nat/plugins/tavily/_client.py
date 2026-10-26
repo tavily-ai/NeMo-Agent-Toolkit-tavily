@@ -44,9 +44,9 @@ def resolve_api_key(api_key: SerializableSecretStr | None) -> str:
     return resolved
 
 
-def build_async_client_from_key(api_key: str) -> AsyncTavilyClient:
+def build_async_client_from_key(api_key: str, **options) -> AsyncTavilyClient:
     """Construct an AsyncTavilyClient from an already resolved API key."""
-    return AsyncTavilyClient(api_key=api_key, client_name="nemo-agent-toolkit-tavily")
+    return AsyncTavilyClient(api_key=api_key, client_name="nemo-agent-toolkit-tavily", **options)
 
 
 def build_async_client(api_key: SerializableSecretStr | None) -> AsyncTavilyClient:

@@ -23,6 +23,8 @@ This package supports NVIDIA NeMo Agent Toolkit `>=1.8,<2.0`.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `api_key` | `str` (secret) | `""` | Tavily API key. Falls back to `TAVILY_API_KEY` env var. |
+| `api_base_url` | `str \| None` | `None` | Optional compatible API proxy URL. |
+| `project_id`, `session_id`, `human_id` | `str \| None` | `None` | Optional request tracking headers. SDK defaults apply when omitted. |
 | `research_timeout_seconds` | `float \| None` | `900.0` | HTTP timeout for the research SSE stream. `None` disables the client-side cap. |
 | `research_include_trace` | `bool` | `False` | Include intermediate tool_call events from the research stream in the output (under `trace`). Useful for debugging. |
 
@@ -53,6 +55,18 @@ function_groups:
 | `tavily__crawl` | Crawl a website with configurable depth/breadth |
 | `tavily__map` | Discover URLs on a domain without extracting content |
 | `tavily__research` | Deep multi-source research with citations (30–120s) |
+
+Schemas expose the installed SDK's named options plus public Search chunk, safe-search,
+image-description and published-date controls, and Research domain, output-length and
+file options. Published-date metadata is beta. Research `include_domains` is a soft
+preference; `exclude_domains` blocks domains. The minimum Tavily SDK is 0.8.5 so the
+current named language/domain options and attribution are available.
+
+Extract, Crawl and Map expose their API operation `timeout` (also used by the SDK for
+the HTTP request). Search transport timeouts stay hidden; Research uses
+`research_timeout_seconds`. Research raises an error if the stream ends before its
+`done` event, rather than returning a partial report as complete. Both LF and CRLF
+SSE separators are supported.
 
 ## Minimal Workflow
 

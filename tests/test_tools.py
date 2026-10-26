@@ -28,6 +28,8 @@ from nat.plugin_api import SerializableSecretStr
 from nat.test import ToolTestRunner
 from nat.plugins.tavily._client import build_async_client
 from nat.plugins.tavily.tools import _HIDDEN_PARAMS
+from nat.plugins.tavily.tools import _EXTRA_API_PARAMS
+from nat.plugins.tavily.tools import _API_TIMEOUT_METHODS
 from nat.plugins.tavily.tools import TavilyCrawlInput
 from nat.plugins.tavily.tools import TavilyExtractInput
 from nat.plugins.tavily.tools import TavilyMapInput
@@ -47,7 +49,7 @@ def _expected_fields(method) -> set[str]:
     sig = inspect.signature(method)
     return {
         name for name, p in sig.parameters.items()
-        if name not in _HIDDEN_PARAMS
+        if (name not in _HIDDEN_PARAMS or (name == "timeout" and method.__name__ in _API_TIMEOUT_METHODS))
         and p.kind not in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
     }
 
@@ -75,7 +77,7 @@ async def test_package_entry_point_loads_tavily_plugin(monkeypatch):
     (TavilyResearchInput, AsyncTavilyClient.research, "input"),
 ])
 def test_schema_mirrors_sdk_signature(schema, method, required_field):
-    assert set(schema.model_fields) == _expected_fields(method)
+    assert set(schema.model_fields) == _expected_fields(method) | set(_EXTRA_API_PARAMS.get(method.__name__, {}))
     assert schema.model_fields[required_field].is_required()
     for name, field in schema.model_fields.items():
         if name == required_field:
@@ -258,7 +260,7 @@ async def test_research_stream_consumes_final_sse_block_without_trailing_separat
     chunks = [
         f"data: {json.dumps(payloads[0])}\n\n".encode(),
         f"data: {json.dumps(payloads[1])}\n\n".encode(),
-        f"data: {json.dumps(payloads[2])}".encode(),
+        f"data: {json.dumps(payloads[2])}\n\nevent: done".encode(),
     ]
 
     result = await _accumulate_research_stream(_stream_chunks(chunks), include_trace=True)
@@ -275,3 +277,68 @@ async def test_research_stream_consumes_final_sse_block_without_trailing_separat
             "content": "Plan the query",
         }]],
     }
+
+
+@pytest.mark.parametrize("tool, payload, expected", [
+    ("search", {"query": "synthetic", "include_domains": ["example.com"],
+                "include_domains_mode": "prefer", "language": "en", "filter_by_language": False,
+                "safe_search": False, "chunks_per_source": 2, "include_published_date": True,
+                "filter_by_published_date": False},
+     {"include_domains_mode": "prefer", "language": "en", "filter_by_language": False,
+      "safe_search": False, "chunks_per_source": 2, "include_published_date": True,
+      "filter_by_published_date": False}),
+    ("extract", {"urls": ["https://example.com"], "timeout": 25}, {"timeout": 25}),
+    ("crawl", {"url": "https://example.com", "timeout": 100}, {"timeout": 100}),
+    ("map", {"url": "https://example.com", "timeout": 100}, {"timeout": 100}),
+])
+async def test_current_options_reach_http_request(monkeypatch, tool, payload, expected):
+    import httpx
+
+    captured = {}
+
+    async def send(self, request, **kwargs):
+        captured["body"] = json.loads(request.content)
+        captured["headers"] = request.headers
+        captured["url"] = str(request.url)
+        return httpx.Response(200, request=request, json={"results": [], "failed_results": [], "usage": {"credits": 0}})
+
+    monkeypatch.setattr(httpx.AsyncClient, "send", send)
+    config = TavilyToolsGroupConfig(
+        api_key=SerializableSecretStr("test-placeholder"), api_base_url="https://synthetic.invalid", include=[tool],
+        project_id="test-project", session_id="test-session", human_id="test-human",
+    )
+    # Use a configured group through the same builder as the runtime.
+    async with WorkflowBuilder() as builder:
+        group = await builder.add_function_group("tavily", config)
+        await group.get_accessible_functions()
+        function = await builder.get_function(f"tavily__{tool}")
+        result = await function.ainvoke(payload)
+    assert result["usage"] == {"credits": 0}
+    for key, value in expected.items():
+        assert captured["body"][key] == value
+    assert captured["url"] == f"https://synthetic.invalid/{tool}"
+    assert captured["headers"]["X-Client-Name"] == "nemo-agent-toolkit-tavily"
+    assert captured["headers"]["X-Client-Source"] == "tavily-python"
+    assert captured["headers"]["X-Project-ID"] == "test-project"
+    assert captured["headers"]["X-Session-Id"] == "test-session"
+    assert captured["headers"]["X-Human-Id"] == "test-human"
+
+
+async def test_research_current_options_and_completed_stream(monkeypatch):
+    captured = {}
+
+    async def research(self, **kwargs):
+        captured.update(kwargs)
+        return _stream_chunks([b'data: {"choices":[{"delta":{"content":{"answer":"test"},"sources":[{"url":"https://example.com"}]}}]}\n\nevent: done\n\n'])
+
+    monkeypatch.setattr(AsyncTavilyClient, "research", research)
+    monkeypatch.setenv("TAVILY_API_KEY", "test-placeholder")
+    options = {"input": "synthetic", "include_domains": ["example.com"], "exclude_domains": [],
+               "output_length": "short", "files": [], "output_schema": {"properties": {}}}
+    result = await ToolTestRunner().test_function_group_tool(
+        config_type=TavilyToolsGroupConfig, function_name="research", input_kwargs=options)
+    for key, value in options.items():
+        assert captured[key] == value
+    assert result["content"] == {"answer": "test"}
+    assert result["sources"] == [{"url": "https://example.com"}]
+    assert captured["stream"] is True

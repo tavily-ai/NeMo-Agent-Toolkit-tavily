@@ -24,6 +24,7 @@ from typing import Annotated
 from typing import Any
 from typing import AsyncIterator
 from typing import Callable
+from typing import Literal
 from typing import Union
 
 from pydantic import BaseModel
@@ -45,12 +46,30 @@ from .parse_streaming import _accumulate_research_stream
 
 logger = logging.getLogger(__name__)
 
-# SDK params we never expose to the LLM. `self` is the bound instance, `kwargs` is the
-# SDK's forward-compat escape hatch, `timeout` is an HTTP-transport concern, and `stream`
-# is locked to True internally for `research` (the wrapper consumes the SSE stream).
+# Transport settings stay hidden; Extract/Crawl/Map timeout also controls the API
+# operation and is exposed below. Research always streams internally.
 _HIDDEN_PARAMS: frozenset[str] = frozenset({"self", "kwargs", "timeout", "stream"})
 
 _LIST_ORIGINS: tuple[Any, ...] = (list, tuple, set, frozenset, AbcSequence)
+
+# Public API parameters currently forwarded through SDK **kwargs rather than named
+# in the SDK method signature. Keep them visible in generated agent tool schemas.
+_EXTRA_API_PARAMS: dict[str, dict[str, tuple[Any, str]]] = {
+    "search": {
+        "chunks_per_source": (int, "Chunks per source (1-3) for basic, advanced or fast."),
+        "include_image_descriptions": (bool, "Include descriptions for returned images."),
+        "safe_search": (bool, "Filter unsafe results; unavailable for fast/ultra-fast."),
+        "include_published_date": (bool, "Include estimated published dates (beta)."),
+        "filter_by_published_date": (bool, "Remove undated or out-of-window results."),
+    },
+    "research": {
+        "include_domains": (list[str], "Prefer these domains (up to 20); not a hard filter."),
+        "exclude_domains": (list[str], "Exclude these domains (up to 20)."),
+        "output_length": (Literal["short", "standard", "long"], "Report length."),
+        "files": (list[dict[str, Any]], "Supporting files in the API file format."),
+    },
+}
+_API_TIMEOUT_METHODS = frozenset({"extract", "crawl", "map"})
 
 
 def _annotation_accepts_list(annotation: Any) -> bool:
@@ -93,7 +112,9 @@ def _build_input_schema(method: Callable, name: str) -> type[BaseModel]:
     sig = inspect.signature(method)
     fields: dict[str, tuple[Any, Any]] = {}
     for param_name, param in sig.parameters.items():
-        if param_name in _HIDDEN_PARAMS:
+        if param_name in _HIDDEN_PARAMS and not (
+            param_name == "timeout" and method.__name__ in _API_TIMEOUT_METHODS
+        ):
             continue
         if param.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
             continue
@@ -113,6 +134,12 @@ def _build_input_schema(method: Callable, name: str) -> type[BaseModel]:
             annotation = Annotated[annotation, BeforeValidator(_coerce_json_list)]
 
         fields[param_name] = (annotation, Field(default=default))
+
+    for param_name, (annotation, description) in _EXTRA_API_PARAMS.get(method.__name__, {}).items():
+        if param_name not in fields:
+            if _annotation_accepts_list(annotation):
+                annotation = Annotated[annotation, BeforeValidator(_coerce_json_list)]
+            fields[param_name] = (Union[annotation, None], Field(default=None, description=description))
 
     return create_model(
         name,
@@ -162,6 +189,11 @@ class TavilyToolsGroupConfig(FunctionGroupBaseConfig, name="tavily"):
         description="Tavily API key. Falls back to the TAVILY_API_KEY env var.",
     )
 
+    api_base_url: str | None = None
+    project_id: str | None = None
+    session_id: str | None = None
+    human_id: str | None = None
+
     research_timeout_seconds: float | None = Field(
         default=900.0,
         gt=0,
@@ -178,27 +210,32 @@ class TavilyToolsGroupConfig(FunctionGroupBaseConfig, name="tavily"):
 async def tavily_tools(config: TavilyToolsGroupConfig, _builder: Builder) -> AsyncIterator[FunctionGroup]:
     """Register the `tavily` function group."""
     api_key = resolve_api_key(config.api_key)
+    client_options = {
+        key: getattr(config, key)
+        for key in ("api_base_url", "project_id", "session_id", "human_id")
+        if getattr(config, key) is not None
+    }
 
     async def _search(value: TavilySearchInput) -> dict:
-        async with build_async_client_from_key(api_key) as client:
+        async with build_async_client_from_key(api_key, **client_options) as client:
             return await client.search(**value.model_dump(exclude_none=True))
 
     async def _extract(value: TavilyExtractInput) -> dict:
-        async with build_async_client_from_key(api_key) as client:
+        async with build_async_client_from_key(api_key, **client_options) as client:
             return await client.extract(**value.model_dump(exclude_none=True))
 
     async def _crawl(value: TavilyCrawlInput) -> dict:
-        async with build_async_client_from_key(api_key) as client:
+        async with build_async_client_from_key(api_key, **client_options) as client:
             return await client.crawl(**value.model_dump(exclude_none=True))
 
     async def _map(value: TavilyMapInput) -> dict:
-        async with build_async_client_from_key(api_key) as client:
+        async with build_async_client_from_key(api_key, **client_options) as client:
             return await client.map(**value.model_dump(exclude_none=True))
 
     async def _research(value: TavilyResearchInput) -> dict:
         # `client.research` is async-def; awaiting it returns an AsyncGenerator[bytes] when
         # stream=True (or a dict when stream=False, which we don't use here).
-        async with build_async_client_from_key(api_key) as client:
+        async with build_async_client_from_key(api_key, **client_options) as client:
             stream = await client.research(
                 stream=True,
                 timeout=config.research_timeout_seconds,

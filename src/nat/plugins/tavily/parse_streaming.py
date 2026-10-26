@@ -16,6 +16,7 @@
 
 import json
 import logging
+import re
 from typing import AsyncIterator
 
 logger = logging.getLogger(__name__)
@@ -115,8 +116,8 @@ async def _accumulate_research_stream(
         if not chunk:
             continue
         buffer += chunk
-        while b"\n\n" in buffer:
-            block, buffer = buffer.split(b"\n\n", 1)
+        while separator := re.search(rb"\r?\n\r?\n", buffer):
+            block, buffer = buffer[:separator.start()], buffer[separator.end():]
             result = handle_sse_block(block)
             if result is not None:
                 return result
@@ -126,11 +127,4 @@ async def _accumulate_research_stream(
         if result is not None:
             return result
 
-    return _finalize_research(
-        content_parts=content_parts,
-        structured_content=structured_content,
-        sources=sources,
-        model=model,
-        trace=trace,
-        include_trace=include_trace,
-    )
+    raise RuntimeError("Tavily research stream ended before the done event; report is incomplete")
